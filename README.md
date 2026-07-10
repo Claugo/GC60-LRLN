@@ -41,7 +41,7 @@ This README serves as a quick technical overview of the source code and performa
 
 > **Note:** The comprehensive scientific documentation hosted on Zenodo is written entirely in Italian.
 
-🔗 [Insert your Zenodo DOI Link Here]
+🔗 [[Insert your Zenodo DOI Link Here](https://zenodo.org/records/21295238)]
 
 ---
 
