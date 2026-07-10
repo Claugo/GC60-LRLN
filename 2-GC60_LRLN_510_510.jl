@@ -1,5 +1,6 @@
 # luglio 2026 - Test LRLN Sieve con Modulo P = 510510 e logica NextPrime
 print("\033c")
+# luglio 2026 - Test LRLN Sieve con Modulo P = 510510 e logica Gap Puri
 using BenchmarkTools
 using Base.Threads
 
@@ -14,10 +15,25 @@ struct PrimorialWheel
     is_coprime::Vector{Bool} 
 end
 
-# --- 1. PRE-COMPUTAZIONE DELLA RUOTA (WHEEL) ---
+# --- FASE 1: STRUTTURE DELLA RUOTA E GENERAZIONE DEI GAP ESTESI ---
+
+function generate_modulo_gaps()
+    modulo_gap = UInt64[]
+    precedente = UInt64(19)
+
+    # Estendiamo la ricerca fino a 510510 + 19 per includere i passi dei residui iniziali
+    for i in UInt64(23):UInt64(2):(UInt64(510510) + 19)
+        if i % 3 != 0 && i % 5 != 0 && i % 7 != 0 &&
+           i % 11 != 0 && i % 13 != 0 && i % 17 != 0
+            push!(modulo_gap, i - precedente)
+            precedente = i
+        end
+    end
+    return modulo_gap
+end
 
 function generate_wheel(P::UInt64)
-    println("⚙️ Generazione tabelle ruota per P = $P...")
+    println("[FASE 1] Generazione tabelle ruota per P = $P...")
     coprimes = UInt64[]
     for x in 1:P
         if gcd(x, P) == 1
@@ -62,7 +78,6 @@ function generate_wheel(P::UInt64)
     return PrimorialWheel(P, jump_table, lookup_table, offset_table, phi_P, is_coprime)
 end
 
-# --- FUNZIONE DI APPOGGIO PER IL TUO NEXTPRIME ---
 function get_next_prime_sieved(current::UInt64, sieve::Vector{Bool}, max_limit::UInt64)
     nxt = current + 1
     while nxt <= max_limit
@@ -74,20 +89,18 @@ function get_next_prime_sieved(current::UInt64, sieve::Vector{Bool}, max_limit::
     return max_limit + 1
 end
 
-# --- 2. SELEZIONE SMART DIVISORI (CON LOGICA NEXTPRIME + BLOCCO PARALLELO BLINDATO) ---
+# --- FASE 2 e FASE 3: RACCOLTA DEI DIVISORI UTILI CON LOGICA PURA GAP ---
 
-function get_smart_divisors(n::UInt64, W::UInt64, limit::UInt64, wheel::PrimorialWheel)
+function get_smart_divisors(n::UInt128, W::UInt64, limit::UInt64, modulo_gap::Vector{UInt64})
     num_threads = Threads.nthreads()
-    P = wheel.P
-    is_coprime = wheel.is_coprime
+    MOD = UInt64(510510)
+    limit_f1 = 2 * W
 
     # =========================================================================
-    # FASE 1: La tua logica "NextPrime" fino a 2*W
+    # [FASE 2] Inserimento numeri primi NextPrime fino a 2W nella memoria
     # =========================================================================
-    limit_f1 = 2 * W
-    println("🌱 Fase 1: Generazione tramite NextPrime fino a 2W ($limit_f1)...")
+    println("[FASE 2] Generazione tramite NextPrime fino a 2W ($limit_f1)...")
     
-    # Prepariamo un setaccio di supporto in background per far girare il tuo nextprime a O(1)
     sieve = fill(true, limit_f1)
     sieve[1] = false
     for p in 2:Int(floor(sqrt(limit_f1)))
@@ -98,92 +111,83 @@ function get_smart_divisors(n::UInt64, W::UInt64, limit::UInt64, wheel::Primoria
         end
     end
 
-    numeri_utili = UInt64[]
+    divisori_utili = UInt64[]
     pr = UInt64(1)
     
-    # Il tuo ciclo While originale tradotto fedelmente ed efficientemente
     while true
-        primes_val = get_next_prime_sieved(pr, sieve, limit_f1)
+        primes_val = get_next_prime_sieved(pr, sieve, UInt64(limit_f1))
         if primes_val > limit_f1
             break
         end
-        # Saltiamo i primi 7 piccoli primi (2,3,5,7,11,13,17) già gestiti dal Sub-Task A della ruota
         if primes_val >= 19
-            push!(numeri_utili, primes_val)
+            push!(divisori_utili, primes_val)
         end
         pr = primes_val
     end
 
     # =========================================================================
-    # FASE 2: Selezione oltre 2*W con la tua legge geometrica (Blindata contro i bug di Julia)
+    # [FASE 3] Viaggio sulla Ruota (19 + gaps...) e verifica LRLN parallela
     # =========================================================================
-    r_start = limit_f1 + 1
-    if r_start % 2 == 0
-        r_start += 1
-    end
-    r_end = limit
-
-    if r_start > r_end
-        return numeri_utili
-    end
-
-    println("🔍 Fase 2: Setaccio parallelo oltre 2W fino a Radice ($r_end)...")
-    total_elements = div(r_end - r_start, 2) + 1
-    chunk_size = div(total_elements, num_threads)
+    println("[FASE 3] Viaggio sui passi di gap della ruota fino a Radice ($limit)...")
+    
+    max_c = div(limit, MOD)
+    chunks_per_thread = div(max_c, num_threads) + 1
     
     thread_divs = [UInt64[] for _ in 1:num_threads]
     
-    # Il blocco 'let' impedisce a Julia di allocare memoria a vuoto sulle variabili esterne
-    let n=n, W=W, P=P, is_coprime=is_coprime, thread_divs=thread_divs, chunk_size=chunk_size, r_start=r_start, r_end=r_end, num_threads=num_threads
+    let n=n, W=W, limit=limit, MOD=MOD, limit_f1=limit_f1, modulo_gap=modulo_gap, thread_divs=thread_divs, chunks_per_thread=chunks_per_thread, max_c=max_c
         Threads.@threads for t in 1:num_threads
-            t_start = r_start + (t - 1) * chunk_size * 2
-            t_end = (t == num_threads) ? r_end : t_start + (chunk_size * 2) - 2
+            c_start = (t - 1) * chunks_per_thread
+            c_end = t * chunks_per_thread - 1
+            if c_end > max_c
+                c_end = max_c
+            end
             
-            # Nota fondamentale: Usiamo UInt64(2) come passo per non confondere la CPU
-            for p_f2 in t_start:UInt64(2):t_end
-                rem_P = p_f2 % P
-                if !is_coprime[rem_P + 1]
-                    continue 
-                end
+            for c in c_start:c_end
+                # Il tuo innesco originale da 19 avanzato solo tramite addizioni di gap
+                p_f2 = MOD * c + 19
                 
-                r = n % p_f2
-                if r % 2 == 0 
-                    if (p_f2 - r) <= W
-                        @inbounds push!(thread_divs[t], p_f2) 
+                for g in modulo_gap
+                    if p_f2 > limit
+                        break
                     end
+                    
+                    if p_f2 > limit_f1
+                        r = UInt64(n % p_f2)
+                        if r % 2 == 0 
+                            if (p_f2 - r) <= W
+                                @inbounds push!(thread_divs[t], p_f2) 
+                            end
+                        end
+                    end
+                    p_f2 += g
                 end
             end
         end
     end
     
-    # Unione finale delle due liste
-    smart_divs = UInt64[]
-    size_total = length(numeri_utili) + sum(length(v) for v in thread_divs)
-    sizehint!(smart_divs, size_total)
-    
-    append!(smart_divs, numeri_utili) 
     for t in 1:num_threads
-        append!(smart_divs, thread_divs[t])
+        append!(divisori_utili, thread_divs[t])
     end
     
-    return smart_divs
+    return divisori_utili
 end
 
-# --- 3. MOTORE DI NAVIGAZIONE E SETACCIO PARALLELO ---
+# --- [FASE 4] MOTORE DI NAVIGAZIONE E SETACCIO DELLA FINESTRA n+W ---
 
-function lrln_parallel_engine(n::UInt64, W::UInt64, wheel::PrimorialWheel, smart_divs::Vector{UInt64})
+function lrln_parallel_engine(n::UInt128, W::UInt64, wheel::PrimorialWheel, divisori_utili::Vector{UInt64})
     num_threads = Threads.nthreads()
     segment_size = div(W, num_threads)
     is_prime_candidate = fill(true, W + 1)
 
-    println("🚀 Avvio Engine su $num_threads thread...")
+    println("[FASE 4] Avvio scrematura finestra su $num_threads thread...")
 
-    let n=n, W=W, wheel=wheel, smart_divs=smart_divs, is_prime_candidate=is_prime_candidate, segment_size=segment_size, num_threads=num_threads
-        @threads for t in 1:num_threads
+    let n=n, W=W, wheel=wheel, divisori_utili=divisori_utili, is_prime_candidate=is_prime_candidate, segment_size=segment_size, num_threads=num_threads
+        Threads.@threads for t in 1:num_threads
             start_offset = (t - 1) * segment_size
             end_offset = (t == num_threads) ? W : (t * segment_size) - 1
             
-            rem_P = (n + start_offset) % wheel.P
+            rem_P = UInt64((n + start_offset) % wheel.P)
             P_val = wheel.P
             
             for i in start_offset:end_offset
@@ -196,8 +200,8 @@ function lrln_parallel_engine(n::UInt64, W::UInt64, wheel::PrimorialWheel, smart
                 end
             end
 
-            for p in smart_divs
-                r_start = (n + start_offset) % p
+            for p in divisori_utili
+                r_start = UInt64((n + start_offset) % p)
                 to_next = (r_start == 0) ? UInt64(0) : (p - r_start)
                 
                 if (n + start_offset + to_next) % 2 == 0
@@ -213,7 +217,7 @@ function lrln_parallel_engine(n::UInt64, W::UInt64, wheel::PrimorialWheel, smart
         end
     end
 
-    primes = UInt64[]
+    primes = UInt128[]
     for i in 1:W+1
         if is_prime_candidate[i]
             push!(primes, n + i - 1)
@@ -222,17 +226,17 @@ function lrln_parallel_engine(n::UInt64, W::UInt64, wheel::PrimorialWheel, smart
     return primes
 end
 
-# --- 4. ESPORTAZIONE FORMATO SUFFIX ---
+# --- [FASE 5] ESPORTAZIONE FILE PRIMES_SUFFIX.TXT ---
 
-function export_primes_suffix(n::UInt64, W::UInt64, primes::Vector{UInt64}, filename::String)
+function export_primes_suffix(n::UInt128, W::UInt64, primes::Vector{UInt128}, filename::String)
     open(filename, "w") do io
         println(io, "#A=$n W=$W")
         for p in primes
-            offset = p - n
+            offset = UInt64(p - n)
             println(io, offset)
         end
     end
-    println("✅ File esportato con successo: $filename")
+    println("[FASE 5] File esportato con successo: $filename")
 end
 
 # --- MAIN EXECUTION ---
@@ -240,31 +244,35 @@ end
 function main()
     start_time = time_ns()
 
-    n = UInt64(10000000000000000000)      
+    # Puoi impostare qui la magnitudo desiderata (es. 10^19 o 10^21) senza problemi di overflow
+    n = parse(UInt128, "10000000000000000000")      
     W = UInt64(1_000_000)  
     P_val = UInt64(510510)  
     limit = UInt64(floor(sqrt(n + W)))
     output_file = "primes_suffix.txt"
 
-    println("--- LRLN MASTER ENGINE (NATIVE TWO-PHASE MODE) ---")
+    println("--- LRLN MASTER ENGINE (NATIVE JULIA 128-BIT PURE GAP MODE) ---")
     println("n: $n | W: $W | P: $P_val")
-    println("Threads: $(Threads.nthreads())\n")
+    println("Threads attivi in Julia: $(Threads.nthreads())\n")
 
-    @time wheel = generate_wheel(P_val)
-    @time smart_divs = get_smart_divisors(n, W, limit, wheel)
-    println("Divisori Smart complessivi in lista: $(length(smart_divs))")
+    modulo_gap = generate_modulo_gaps()
+    wheel = generate_wheel(P_val)
+    
+    println("\n[INFO] Avvio raccolta divisori utili...")
+    @time divisori_utili = get_smart_divisors(n, W, limit, modulo_gap)
+    println("Divisori utili complessivi in memoria: $(length(divisori_utili))")
 
-    println("\n🚀 Esecuzione Setaccio Parallelo...")
-    @time primes = lrln_parallel_engine(n, W, wheel, smart_divs)
+    println("\n[INFO] Esecuzione Setaccio Finestra...")
+    @time primes = lrln_parallel_engine(n, W, wheel, divisori_utili)
 
-    println("\n💾 Esportazione in formato suffix...\n")
+    println("\n[INFO] Esportazione in corso...")
     @time export_primes_suffix(n, W, primes, output_file)
 
     println("\n--- RISULTATI FINALI ---")
-    println("Candidati primi trovati: $(length(primes))")
+    println("Candidati primi trovati nella finestra: $(length(primes))")
     if length(primes) > 0
-        println("Primo offset: $(primes[1] - n)")
-        println("Ultimo offset: $(primes[end] - n)")
+        println("Primo offset: $(UInt64(primes[1] - n))")
+        println("Ultimo offset: $(UInt64(primes[end] - n))")
     end
 
     end_time = time_ns()
@@ -274,7 +282,7 @@ function main()
     secondi = div(total_ms % 60000, 1000)
     millisecondi = total_ms % 1000
 
-    println("\n⏱️ Tempo totale di esecuzione -> $minuti min : $secondi sec : $millisecondi ms")
+    println("\n[TEMPO] Tempo totale di esecuzione -> $minuti min : $secondi sec : $millisecondi ms")
 end
 
 main();
